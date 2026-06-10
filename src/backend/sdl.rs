@@ -36,6 +36,10 @@ impl SDLBackend {
         sdl2::hint::set("SDL_JOYSTICK_HIDAPI_PS4_RUMBLE", "1");
         sdl2::hint::set("SDL_JOYSTICK_HIDAPI_PS5_RUMBLE", "1");
         sdl2::hint::set("SDL_JOYSTICK_HIDAPI_JOY_CONS", "1");
+        // Expose single Joy-Cons in their vertical (upright) layout instead of
+        // the sideways mini-gamepad layout, so sticks/buttons/gyro axes match
+        // the natural one-handed grip.
+        sdl2::hint::set("SDL_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS", "1");
         sdl2::hint::set("SDL_JOYSTICK_HIDAPI_SWITCH_HOME_LED", "0");
         sdl2::hint::set("SDL_GAMECONTROLLER_USE_BUTTON_LABELS", "0");
 
@@ -150,6 +154,8 @@ impl Backend for SDLBackend {
                                 controller,
                                 engine,
                                 calibrator,
+                                zl_pressed: false,
+                                zr_pressed: false,
                             },
                         );
                     }
@@ -164,10 +170,9 @@ impl Backend for SDLBackend {
                         button,
                     } => {
                         if let Some(controller) = controllers.get_mut(&which) {
-                            controller
-                                .engine
-                                .buttons()
-                                .key_down(sdl_to_sys(button), now);
+                            if let Some(key) = sdl_to_sys(button) {
+                                controller.engine.buttons().key_down(key, now);
+                            }
                         }
                     }
                     Event::ControllerButtonUp {
@@ -176,7 +181,9 @@ impl Backend for SDLBackend {
                         button,
                     } => {
                         if let Some(controller) = controllers.get_mut(&which) {
-                            controller.engine.buttons().key_up(sdl_to_sys(button), now);
+                            if let Some(key) = sdl_to_sys(button) {
+                                controller.engine.buttons().key_up(key, now);
+                            }
                         }
                     }
                     _ => {}
@@ -201,6 +208,30 @@ impl Backend for SDLBackend {
 
                 engine.handle_left_stick(left, now, dt);
                 engine.handle_right_stick(right, now, dt);
+
+                // SDL exposes ZL/ZR as trigger axes, not buttons (digital
+                // 0/max on Joy-Cons); synthesize key edges so mappings like
+                // `ZL = LMOUSE` work with the SDL backend too.
+                let zl_now =
+                    c.axis(Axis::TriggerLeft) as f64 / (i16::MAX as f64) >= 0.5;
+                if zl_now != controller.zl_pressed {
+                    controller.zl_pressed = zl_now;
+                    if zl_now {
+                        engine.buttons().key_down(JoyKey::ZL, now);
+                    } else {
+                        engine.buttons().key_up(JoyKey::ZL, now);
+                    }
+                }
+                let zr_now =
+                    c.axis(Axis::TriggerRight) as f64 / (i16::MAX as f64) >= 0.5;
+                if zr_now != controller.zr_pressed {
+                    controller.zr_pressed = zr_now;
+                    if zr_now {
+                        engine.buttons().key_down(JoyKey::ZR, now);
+                    } else {
+                        engine.buttons().key_up(JoyKey::ZR, now);
+                    }
+                }
 
                 if c.sensor_enabled(SensorType::Accelerometer)
                     && c.sensor_enabled(SensorType::Gyroscope)
@@ -257,10 +288,14 @@ struct ControllerState {
     controller: GameController,
     engine: Engine,
     calibrator: Option<BetterCalibration>,
+    // SDL reports ZL/ZR as trigger axes, not buttons; track the pressed
+    // state so the poll loop can synthesize key up/down edges.
+    zl_pressed: bool,
+    zr_pressed: bool,
 }
 
-fn sdl_to_sys(button: Button) -> JoyKey {
-    match button {
+fn sdl_to_sys(button: Button) -> Option<JoyKey> {
+    Some(match button {
         Button::A => JoyKey::S,
         Button::B => JoyKey::E,
         Button::X => JoyKey::W,
@@ -276,11 +311,16 @@ fn sdl_to_sys(button: Button) -> JoyKey {
         Button::DPadDown => JoyKey::Down,
         Button::DPadLeft => JoyKey::Left,
         Button::DPadRight => JoyKey::Right,
-        Button::Misc1 => todo!(),
-        Button::Paddle1 => todo!(),
-        Button::Paddle2 => todo!(),
-        Button::Paddle3 => todo!(),
-        Button::Paddle4 => todo!(),
-        Button::Touchpad => todo!(),
-    }
+        // Switch capture button arrives as Misc1.
+        Button::Misc1 => JoyKey::Capture,
+        // Joy-Con SL/SR rail buttons arrive as paddles; the exact paddle
+        // number depends on which Joy-Con (L/R), so map upper/lower pairs to
+        // SL/SR rather than panicking on todo!().
+        Button::Paddle1 => JoyKey::SL,
+        Button::Paddle2 => JoyKey::SL,
+        Button::Paddle3 => JoyKey::SR,
+        Button::Paddle4 => JoyKey::SR,
+        // PS4/PS5 touchpad click has no JoyKey equivalent; ignore it.
+        Button::Touchpad => return None,
+    })
 }
