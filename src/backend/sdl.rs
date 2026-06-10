@@ -324,3 +324,48 @@ fn sdl_to_sys(button: Button) -> Option<JoyKey> {
         Button::Touchpad => return None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sdl_to_sys_covers_every_button_without_panicking() {
+        let all = [
+            Button::A,
+            Button::B,
+            Button::X,
+            Button::Y,
+            Button::Back,
+            Button::Guide,
+            Button::Start,
+            Button::LeftStick,
+            Button::RightStick,
+            Button::LeftShoulder,
+            Button::RightShoulder,
+            Button::DPadUp,
+            Button::DPadDown,
+            Button::DPadLeft,
+            Button::DPadRight,
+            Button::Misc1,
+            Button::Paddle1,
+            Button::Paddle2,
+            Button::Paddle3,
+            Button::Paddle4,
+            Button::Touchpad,
+        ];
+        for b in all {
+            let _ = sdl_to_sys(b);
+        }
+    }
+
+    #[test]
+    fn sdl_to_sys_maps_switch_extras() {
+        assert!(matches!(sdl_to_sys(Button::Misc1), Some(JoyKey::Capture)));
+        assert!(matches!(sdl_to_sys(Button::Paddle1), Some(JoyKey::SL)));
+        assert!(matches!(sdl_to_sys(Button::Paddle2), Some(JoyKey::SL)));
+        assert!(matches!(sdl_to_sys(Button::Paddle3), Some(JoyKey::SR)));
+        assert!(matches!(sdl_to_sys(Button::Paddle4), Some(JoyKey::SR)));
+        assert!(sdl_to_sys(Button::Touchpad).is_none());
+    }
+}
