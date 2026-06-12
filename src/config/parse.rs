@@ -497,6 +497,9 @@ fn keyboardkey(input: Input) -> IRes<'_, enigo::Key> {
             key_parse(F7, "F7"),
             key_parse(F8, "F8"),
             key_parse(F9, "F9"),
+            // macOS Fn/Globe key (virtual keycode 63); used as a dictation /
+            // Typeless trigger. Maps to CGEvent KeyCode::FUNCTION via enigo.
+            key_parse(Function, "Fn"),
             key_parse(Home, "Home"),
             key_parse(LeftArrow, "left"),
             key_parse(Meta, "Meta"),

@@ -58,6 +58,7 @@ W = 3
 #W = N7
 #W = ADD SUBTRACT DIVIDE MULTIPLY DECIMAL
 W = F7
+W = Fn # macOS Fn/Globe key (fork addition)
 #W = F27
 W = I
 W = Z
