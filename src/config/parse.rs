@@ -483,10 +483,12 @@ fn keyboardkey(input: Input) -> IRes<'_, enigo::Key> {
             key_parse(DownArrow, "down"),
             key_parse(End, "End"),
             key_parse(Escape, "Esc"),
-            key_parse(F1, "F1"),
+            // F10-F12 must come before F1: alt() is first-match and "F1"
+            // would otherwise swallow their prefix, leaving a trailing digit.
             key_parse(F10, "F10"),
             key_parse(F11, "F11"),
             key_parse(F12, "F12"),
+            key_parse(F1, "F1"),
             key_parse(F2, "F2"),
             key_parse(F3, "F3"),
             key_parse(F4, "F4"),
