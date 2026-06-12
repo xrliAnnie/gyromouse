@@ -4,7 +4,7 @@ use std::{
 };
 
 use cgmath::Vector2;
-use enigo::{Direction, Keyboard as _, Mouse as _};
+use enigo::{Direction, Mouse as _};
 use hid_gamepad_types::{Acceleration, Motion, RotationSpeed};
 
 use crate::{
@@ -112,13 +112,13 @@ impl Engine {
                     eprintln!("Warning: event type Click has no effect on gyro on/off");
                 }
                 ExtAction::KeyPress(c, ClickType::Click) => {
-                    self.mouse.enigo().key(c, Direction::Click)?
+                    self.mouse.key(c, Direction::Click)?
                 }
                 ExtAction::KeyPress(c, ClickType::Press) => {
-                    self.mouse.enigo().key(c, Direction::Press)?
+                    self.mouse.key(c, Direction::Press)?
                 }
                 ExtAction::KeyPress(c, ClickType::Release) => {
-                    self.mouse.enigo().key(c, Direction::Release)?
+                    self.mouse.key(c, Direction::Release)?
                 }
                 ExtAction::KeyPress(_, ClickType::Toggle) => {
                     // TODO: Implement key press toggle

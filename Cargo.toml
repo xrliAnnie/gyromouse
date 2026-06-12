@@ -32,6 +32,11 @@ virtual-gamepad = { git = "https://github.com/Yamakaky/virtual-gamepad", optiona
 sdl2 = { version = "0.36", features = ["hidapi"], optional = true }
 env_logger = "0.11.3"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Direct dep (already in tree via enigo) for the flag-aware Fn key path:
+# enigo posts bare keycode 63, but Fn listeners require NX_SECONDARYFNMASK.
+core-graphics = "0.23"
+
 [package.metadata.vcpkg]
 git = "https://github.com/microsoft/vcpkg"
 # Latest master
