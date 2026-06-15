@@ -233,6 +233,15 @@ impl Backend for SDLBackend {
                     }
                 }
 
+                // LEARN-69 F1 (UNVALIDATED): process queued actions (mouse
+                // press/release, GYRO_OFF, ...) BEFORE this tick's motion so a
+                // click edge arms click-stabilization in time to suppress the
+                // same-tick click jerk, and a GYRO_OFF press stops this tick's
+                // motion. Release is also processed here, so the release-tick
+                // motion passes through (v1 does not suppress release jerk —
+                // documented release strategy).
+                engine.apply_actions(now)?;
+
                 if c.sensor_enabled(SensorType::Accelerometer)
                     && c.sensor_enabled(SensorType::Gyroscope)
                 {
@@ -273,7 +282,6 @@ impl Backend for SDLBackend {
                         engine.apply_motion(rotation_speed, acceleration, now, dt);
                     }
                 }
-                engine.apply_actions(now)?;
             }
 
             last_tick = now;

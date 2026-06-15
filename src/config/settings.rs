@@ -19,6 +19,8 @@ pub struct Settings {
     pub zl_mode: TriggerMode,
     pub zr_mode: TriggerMode,
     pub mouse: MouseSettings,
+    /// LEARN-69 Feature 1 — Heisenberg click stabilization (UNVALIDATED).
+    pub click_stab: ClickStabSettings,
 }
 
 impl Default for Settings {
@@ -34,6 +36,7 @@ impl Default for Settings {
             zl_mode: TriggerMode::NoFull,
             zr_mode: TriggerMode::NoFull,
             mouse: MouseSettings::default(),
+            click_stab: ClickStabSettings::default(),
         }
     }
 }
@@ -51,6 +54,7 @@ impl Settings {
             Setting::ZLMode(m) => self.zl_mode = m,
             Setting::ZRMode(m) => self.zr_mode = m,
             Setting::Mouse(m) => self.mouse.apply(m),
+            Setting::ClickStab(s) => self.click_stab.apply(s),
         }
     }
 
@@ -278,6 +282,14 @@ pub struct GyroSettings {
     pub slow_sens: Vector2<f64>,
     pub fast_threshold: f64,
     pub fast_sens: Vector2<f64>,
+    // LEARN-69 Feature 2 — slow-speed auto precision mode (UNVALIDATED).
+    // Semantics mirror tools/gyro-mouse-proto/mapping.py::PrecisionMode.
+    // Defaults are GUESS starting points ([推测]); Annie calibrates on device.
+    pub precision_enabled: bool,
+    pub precision_enter_speed: f64,
+    pub precision_exit_speed: f64,
+    pub precision_gain: f64,
+    pub precision_boost: f64,
 }
 
 impl Default for GyroSettings {
@@ -294,6 +306,13 @@ impl Default for GyroSettings {
             slow_threshold: 0.,
             fast_sens: Vector2::zero(),
             fast_threshold: 0.,
+            // LEARN-69 F2 defaults ([推测], UNVALIDATED) — enabled by default,
+            // independently switchable; enter < exit gives hysteresis.
+            precision_enabled: true,
+            precision_enter_speed: 3.,
+            precision_exit_speed: 8.,
+            precision_gain: 0.5,
+            precision_boost: 1.5,
         }
     }
 }
@@ -319,6 +338,15 @@ impl GyroSettings {
             GyroSetting::CutoffRecovery(s) => self.cutoff_recovery = s,
             GyroSetting::SmoothThreshold(s) => self.smooth_threshold = s,
             GyroSetting::SmoothTime(s) => self.smooth_time = s,
+            // LEARN-69 F2 (UNVALIDATED) — clamp at apply so invalid config can
+            // never crash Annie's session; matches mapping.py clamping.
+            GyroSetting::PrecisionEnabled(b) => self.precision_enabled = b,
+            GyroSetting::PrecisionEnterSpeed(s) => self.precision_enter_speed = s.max(0.),
+            GyroSetting::PrecisionExitSpeed(s) => self.precision_exit_speed = s.max(0.),
+            GyroSetting::PrecisionGain(g) => self.precision_gain = g.clamp(0., 1.),
+            GyroSetting::PrecisionBoost(b) => self.precision_boost = b.max(1.),
+            // NOTE: exit >= enter (hysteresis) is enforced at use-time in
+            // GyroMouse::process, mirroring mapping.py::PrecisionMode.update.
         }
     }
 }
@@ -352,6 +380,38 @@ impl MouseSettings {
         }
     }
 }
+/// LEARN-69 Feature 1 — Heisenberg click-stabilization settings (UNVALIDATED).
+/// Semantics mirror tools/gyro-mouse-proto/mapping.py::ClickStabilizer.
+/// Defaults are GUESS starting points ([推测]); Annie calibrates on device.
+#[derive(Debug, Clone, Copy)]
+pub struct ClickStabSettings {
+    pub enabled: bool,
+    /// Max suppression window after a click button goes down.
+    pub window: Duration,
+    /// Accumulated pixel displacement that declares a drag (release + flush).
+    pub drag_release_dist: f64,
+}
+
+impl Default for ClickStabSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            window: Duration::from_millis(60),
+            drag_release_dist: 40.,
+        }
+    }
+}
+
+impl ClickStabSettings {
+    fn apply(&mut self, setting: ClickStabSetting) {
+        match setting {
+            ClickStabSetting::Enabled(b) => self.enabled = b,
+            ClickStabSetting::Time(t) => self.window = t,
+            ClickStabSetting::DragDistance(d) => self.drag_release_dist = d.max(0.),
+        }
+    }
+}
+
 impl MotionStickSettings {
     fn apply(&mut self, setting: MotionStickSetting) {
         match setting {

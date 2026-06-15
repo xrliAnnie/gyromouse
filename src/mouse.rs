@@ -50,10 +50,21 @@ impl Mouse {
         })
     }
 
+    /// Convert a gyro `MouseMovement` (degrees, +y up) to a float pixel delta
+    /// (+y down) using the calibration. LEARN-69 (UNVALIDATED): exposed so the
+    /// engine can gate movement in float pixel space BEFORE the integer
+    /// quantization / `error_accumulator` in `mouse_move_relative_pixel`.
+    pub fn movement_to_pixels(
+        &self,
+        settings: &MouseSettings,
+        offset: MouseMovement,
+    ) -> Vector2<f64> {
+        vec2(offset.x.0, -offset.y.0) * settings.real_world_calibration * settings.in_game_sens
+    }
+
     // mouse movement is pixel perfect, so we keep track of the error.
     pub fn mouse_move_relative(&mut self, settings: &MouseSettings, offset: MouseMovement) {
-        let offset_pixel =
-            vec2(offset.x.0, -offset.y.0) * settings.real_world_calibration * settings.in_game_sens;
+        let offset_pixel = self.movement_to_pixels(settings, offset);
         self.mouse_move_relative_pixel(offset_pixel);
     }
 

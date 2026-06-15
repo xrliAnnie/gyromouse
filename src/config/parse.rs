@@ -149,6 +149,8 @@ fn setting(input: Input) -> IRes<'_, Setting> {
         }),
         map(stick_setting, Setting::Stick),
         map(mouse_setting, Setting::Mouse),
+        // LEARN-69 Feature 1 (UNVALIDATED)
+        map(click_stab_setting, Setting::ClickStab),
     ))(input)
 }
 
@@ -175,6 +177,58 @@ fn f64_setting<Output>(
         let (input, val) = double.preceded_by(equal_with_space).cut().parse(input)?;
         Ok((input, value_map(val)))
     }
+}
+
+/// LEARN-69 (UNVALIDATED): ON/OFF (or TRUE/FALSE), case-insensitive.
+fn bool_setting<Output>(
+    tag: &'static str,
+    value_map: impl Fn(bool) -> Output,
+) -> impl FnMut(Input) -> IRes<'_, Output> {
+    move |input| {
+        let (input, _) = tag_no_case(tag)(input)?;
+        let (input, val) = alt((
+            value(true, tag_no_case("ON")),
+            value(true, tag_no_case("TRUE")),
+            value(false, tag_no_case("OFF")),
+            value(false, tag_no_case("FALSE")),
+        ))
+        .preceded_by(equal_with_space)
+        .cut()
+        .parse(input)?;
+        Ok((input, value_map(val)))
+    }
+}
+
+/// LEARN-69 Feature 1 — Heisenberg click stabilization (UNVALIDATED).
+/// Long keys MUST precede the bare bool key: f64_setting `.cut()`s after the
+/// tag matches, so a short key matching the prefix of a longer one would hard
+/// fail at the missing `=`.
+fn click_stab_setting(input: Input) -> IRes<'_, ClickStabSetting> {
+    alt((
+        f64_setting(
+            "CLICK_STABILIZATION_DRAG_DISTANCE",
+            ClickStabSetting::DragDistance,
+        ),
+        f64_setting("CLICK_STABILIZATION_TIME", |secs| {
+            ClickStabSetting::Time(Duration::from_secs_f64(secs))
+        }),
+        bool_setting("CLICK_STABILIZATION", ClickStabSetting::Enabled),
+    ))(input)
+}
+
+/// LEARN-69 Feature 2 — slow-speed auto precision mode (UNVALIDATED).
+/// Long keys before the bare bool key (see `click_stab_setting`).
+fn precision_setting(input: Input) -> IRes<'_, GyroSetting> {
+    alt((
+        f64_setting(
+            "PRECISION_MODE_ENTER_SPEED",
+            GyroSetting::PrecisionEnterSpeed,
+        ),
+        f64_setting("PRECISION_MODE_EXIT_SPEED", GyroSetting::PrecisionExitSpeed),
+        f64_setting("PRECISION_MODE_GAIN", GyroSetting::PrecisionGain),
+        f64_setting("PRECISION_MODE_BOOST", GyroSetting::PrecisionBoost),
+        bool_setting("PRECISION_MODE", GyroSetting::PrecisionEnabled),
+    ))(input)
 }
 
 fn double_f64_setting<Output>(
@@ -301,6 +355,9 @@ fn gyro_setting(input: Input) -> IRes<'_, Setting> {
             }),
             setting_invert("GYRO_AXIS_X", |v1, _v2| GyroSetting::InvertX(v1)),
             setting_invert("GYRO_AXIS_Y", |v1, _v2| GyroSetting::InvertY(v1)),
+            // LEARN-69 Feature 2 (UNVALIDATED) — one sub-parser entry so the
+            // gyro_setting alt() stays well under nom's tuple limit.
+            precision_setting,
         )),
         Setting::Gyro,
     )(input)
