@@ -210,6 +210,13 @@ fn click_stab_setting(input: Input) -> IRes<'_, ClickStabSetting> {
             ClickStabSetting::DragDistance,
         ),
         f64_setting("CLICK_STABILIZATION_TIME", |secs| {
+            // Duration::from_secs_f64 panics on negative/NaN/inf — guard + clamp
+            // first (negative/garbage config must not crash the launcher).
+            let secs = if secs.is_finite() && secs >= 0. {
+                secs.min(3600.)
+            } else {
+                0.06
+            };
             ClickStabSetting::Time(Duration::from_secs_f64(secs))
         }),
         bool_setting("CLICK_STABILIZATION", ClickStabSetting::Enabled),

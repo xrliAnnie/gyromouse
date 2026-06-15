@@ -266,4 +266,11 @@ mod precision_test {
         let mut p = PrecisionMode::default();
         assert!(p.update(&settings(true, 8., 3.), 2.));
     }
+
+    #[test]
+    fn negative_speed_clamped() {
+        // negative speed clamps to 0 (treated as parked) — mirrors mapping.py.
+        let mut p = PrecisionMode::default();
+        assert!(p.update(&settings(true, 3., 8.), -5.));
+    }
 }
