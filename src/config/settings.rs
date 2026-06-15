@@ -341,14 +341,22 @@ impl GyroSettings {
             // LEARN-69 F2 (UNVALIDATED) — clamp at apply so invalid config can
             // never crash Annie's session; matches mapping.py clamping.
             GyroSetting::PrecisionEnabled(b) => self.precision_enabled = b,
-            GyroSetting::PrecisionEnterSpeed(s) => self.precision_enter_speed = s.max(0.),
-            GyroSetting::PrecisionExitSpeed(s) => self.precision_exit_speed = s.max(0.),
+            // finite guards (Codex R2 minor): NaN/inf config falls back to the
+            // documented default instead of poisoning thresholds.
+            GyroSetting::PrecisionEnterSpeed(s) => {
+                self.precision_enter_speed = if s.is_finite() { s.max(0.) } else { 3. }
+            }
+            GyroSetting::PrecisionExitSpeed(s) => {
+                self.precision_exit_speed = if s.is_finite() { s.max(0.) } else { 8. }
+            }
             // gain floored strictly >0 (0.05 = mapping.py PRECISION_GAIN_MIN) so
             // gain<=0 can't freeze the cursor; finite guard avoids NaN/inf sens.
             GyroSetting::PrecisionGain(g) => {
                 self.precision_gain = if g.is_finite() { g.clamp(0.05, 1.) } else { 0.5 }
             }
-            GyroSetting::PrecisionBoost(b) => self.precision_boost = b.max(1.),
+            GyroSetting::PrecisionBoost(b) => {
+                self.precision_boost = if b.is_finite() { b.clamp(1., 100.) } else { 1.5 }
+            }
             // NOTE: exit >= enter (hysteresis) is enforced at use-time in
             // GyroMouse::process, mirroring mapping.py::PrecisionMode.update.
         }
@@ -411,7 +419,9 @@ impl ClickStabSettings {
         match setting {
             ClickStabSetting::Enabled(b) => self.enabled = b,
             ClickStabSetting::Time(t) => self.window = t,
-            ClickStabSetting::DragDistance(d) => self.drag_release_dist = d.max(0.),
+            ClickStabSetting::DragDistance(d) => {
+                self.drag_release_dist = if d.is_finite() { d.max(0.) } else { 40. }
+            }
         }
     }
 }

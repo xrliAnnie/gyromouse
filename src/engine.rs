@@ -100,6 +100,20 @@ impl ClickStabilizer {
         }
     }
 
+    /// Instantaneous click (ClickType::Click, e.g. a `!LMOUSE` tap mapping) has
+    /// no separate Release edge. Arm a time-bounded one-shot suppression that
+    /// the window check in `filter()` releases; do NOT touch the pressed set
+    /// (no Release will arrive). No-op if already suppressing or a button is
+    /// held. Mirrors mapping.py::ClickStabilizer.on_click_tap.
+    fn on_click_tap(&mut self, settings: &ClickStabSettings, now: Instant) {
+        if !settings.enabled || self.suppressing || !self.pressed.is_empty() {
+            return;
+        }
+        self.suppressing = true;
+        self.armed_at = Some(now);
+        self.accum = Vector2::zero();
+    }
+
     /// Gate a would-be pixel delta (float, pre-quantization). Returns the delta
     /// to actually emit. Drag-safe via three release rules: cross drag distance
     /// (flush accumulated), window elapsed (drop jitter), or all buttons up.
@@ -227,12 +241,12 @@ impl Engine {
                     eprintln!("Warning: key press toggle is not implemented");
                 }
                 ExtAction::MousePress(c, ClickType::Click) => {
-                    // LEARN-69 F1 (UNVALIDATED): an instantaneous click — bracket
-                    // the synthesized press/release so any same-frame jitter is
-                    // briefly suppressed, then released.
-                    self.click_stab.on_click_down(&self.settings.click_stab, c, now);
+                    // LEARN-69 F1 (UNVALIDATED): an instantaneous click has no
+                    // Release edge — arm a time-bounded one-shot suppression so
+                    // the same-tick click jerk is actually suppressed until the
+                    // window expires (a bare down+up would clear it immediately).
+                    self.click_stab.on_click_tap(&self.settings.click_stab, now);
                     self.mouse.enigo().button(c, Direction::Click)?;
-                    self.click_stab.on_click_up(c);
                 }
                 ExtAction::MousePress(c, ClickType::Press) => {
                     // LEARN-69 F1 (UNVALIDATED): arm suppression on the click edge.
@@ -478,5 +492,76 @@ mod click_stab_test {
         cs.on_click_down(&s, Button::Right, t + ms(6)); // must NOT reset accum
         // not re-armed: 35 + 10 = 45 >= 40 -> drag flush
         assert_eq!(cs.filter(&s, v(10., 0.), t + ms(7)), v(45., 0.));
+    }
+
+    #[test]
+    fn exact_distance_boundary_is_drag() {
+        let mut cs = ClickStabilizer::default();
+        let s = settings();
+        let t = Instant::now();
+        cs.on_click_down(&s, Button::Left, t);
+        assert_eq!(cs.filter(&s, v(40., 0.), t + ms(5)), v(40., 0.)); // |.|==dist -> drag
+        assert!(!cs.suppressing);
+    }
+
+    #[test]
+    fn negative_vector_accumulation() {
+        let mut cs = ClickStabilizer::default();
+        let s = settings();
+        let t = Instant::now();
+        cs.on_click_down(&s, Button::Left, t);
+        assert_eq!(cs.filter(&s, v(-30., 0.), t + ms(5)), v(0., 0.));
+        assert_eq!(cs.filter(&s, v(-20., 0.), t + ms(10)), v(-50., 0.)); // hypot 50 >= 40
+    }
+
+    #[test]
+    fn rearm_after_all_up() {
+        let mut cs = ClickStabilizer::default();
+        let s = settings();
+        let t = Instant::now();
+        cs.on_click_down(&s, Button::Left, t);
+        cs.on_click_up(Button::Left);
+        assert!(!cs.suppressing);
+        cs.on_click_down(&s, Button::Left, t + ms(1000)); // fresh arm
+        assert!(cs.suppressing);
+        assert_eq!(cs.filter(&s, v(3., 0.), t + ms(1001)), v(0., 0.));
+    }
+
+    #[test]
+    fn release_tick_motion_passes_through() {
+        // v1 release strategy: only press-down jitter is suppressed; after all
+        // buttons up, motion passes through (no release-jerk suppression).
+        let mut cs = ClickStabilizer::default();
+        let s = settings();
+        let t = Instant::now();
+        cs.on_click_down(&s, Button::Left, t);
+        assert_eq!(cs.filter(&s, v(2., 0.), t + ms(5)), v(0., 0.));
+        cs.on_click_up(Button::Left);
+        assert_eq!(cs.filter(&s, v(7., 3.), t + ms(6)), v(7., 3.));
+    }
+
+    #[test]
+    fn tap_arms_one_shot_then_window_releases() {
+        // ClickType::Click path: arm a time-bounded one-shot suppression.
+        let mut cs = ClickStabilizer::default();
+        let s = settings();
+        let t = Instant::now();
+        cs.on_click_tap(&s, t);
+        assert!(cs.suppressing);
+        assert_eq!(cs.filter(&s, v(2., 0.), t + ms(5)), v(0., 0.)); // tap jitter eaten
+        assert_eq!(cs.filter(&s, v(1., 0.), t + s.window), v(0., 0.)); // window -> release
+        assert!(!cs.suppressing);
+        assert_eq!(cs.filter(&s, v(5., 0.), t + ms(70)), v(5., 0.)); // passes through
+    }
+
+    #[test]
+    fn tap_ignored_while_held() {
+        let mut cs = ClickStabilizer::default();
+        let s = settings();
+        let t = Instant::now();
+        cs.on_click_down(&s, Button::Left, t);
+        cs.on_click_tap(&s, t + ms(5)); // must be a no-op during a hold
+        assert!(cs.suppressing);
+        assert!(cs.pressed.contains(&0)); // Left still tracked
     }
 }
