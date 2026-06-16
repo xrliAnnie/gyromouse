@@ -233,15 +233,6 @@ impl Backend for SDLBackend {
                     }
                 }
 
-                // LEARN-69 F1 (UNVALIDATED): process queued actions (mouse
-                // press/release, GYRO_OFF, ...) BEFORE this tick's motion so a
-                // click edge arms click-stabilization in time to suppress the
-                // same-tick click jerk, and a GYRO_OFF press stops this tick's
-                // motion. Release is also processed here, so the release-tick
-                // motion passes through (v1 does not suppress release jerk —
-                // documented release strategy).
-                engine.apply_actions(now)?;
-
                 if c.sensor_enabled(SensorType::Accelerometer)
                     && c.sensor_enabled(SensorType::Gyroscope)
                 {
@@ -282,6 +273,19 @@ impl Backend for SDLBackend {
                         engine.apply_motion(rotation_speed, acceleration, now, dt);
                     }
                 }
+
+                // LEARN-69 F1 (UNVALIDATED): actions run AFTER motion — the
+                // upstream order, REQUIRED for drag-safety. On the release tick
+                // the gyro move must be posted as LeftMouseDragged BEFORE the
+                // LeftMouseUp. If actions ran first (Up before the move),
+                // enigo's move_mouse still reads the button as pressed
+                // (NSEvent::pressedMouseButtons lags the just-posted Up) and
+                // emits a LeftMouseDragged AFTER the Up — macOS then sticks the
+                // left button after a drag (Annie real-device bug, LEARN-69).
+                // F1 still arms on the press edge here; suppression covers the
+                // click window from the next tick (~1-frame press leak,
+                // negligible — far cheaper than a stuck button).
+                engine.apply_actions(now)?;
             }
 
             last_tick = now;
