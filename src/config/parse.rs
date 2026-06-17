@@ -238,6 +238,28 @@ fn precision_setting(input: Input) -> IRes<'_, GyroSetting> {
     ))(input)
 }
 
+/// LEARN-81 — motion-wake + dwell-auto-stop implicit clutch (UNVALIDATED).
+/// Long keys before the bare bool key: `MOTION_WAKE` is a prefix of
+/// `MOTION_WAKE_SPEED`, and `f64_setting` `.cut()`s after the tag matches, so
+/// the bare bool must come last or it would hard-fail at the missing `=`.
+fn motion_wake_setting(input: Input) -> IRes<'_, GyroSetting> {
+    alt((
+        f64_setting("MOTION_WAKE_SPEED", GyroSetting::MotionWakeSpeed),
+        f64_setting("MOTION_SLEEP_SPEED", GyroSetting::MotionSleepSpeed),
+        f64_setting("MOTION_SLEEP_DWELL", |secs| {
+            // Duration::from_secs_f64 panics on negative/NaN/inf — guard + clamp
+            // first (garbage config must not crash the launcher).
+            let secs = if secs.is_finite() && secs >= 0. {
+                secs.min(3600.)
+            } else {
+                0.5
+            };
+            GyroSetting::MotionSleepDwell(Duration::from_secs_f64(secs))
+        }),
+        bool_setting("MOTION_WAKE", GyroSetting::MotionWakeEnabled),
+    ))(input)
+}
+
 fn double_f64_setting<Output>(
     tag: &'static str,
     value_map: impl Fn(f64, Option<f64>) -> Output,
@@ -365,6 +387,8 @@ fn gyro_setting(input: Input) -> IRes<'_, Setting> {
             // LEARN-69 Feature 2 (UNVALIDATED) — one sub-parser entry so the
             // gyro_setting alt() stays well under nom's tuple limit.
             precision_setting,
+            // LEARN-81 (UNVALIDATED) — motion-wake implicit clutch sub-parser.
+            motion_wake_setting,
         )),
         Setting::Gyro,
     )(input)
@@ -626,4 +650,56 @@ fn gamepadkey(input: Input) -> IRes<'_, virtual_gamepad::Key> {
         parse(X, "X_X"),
         parse(Y, "X_Y"),
     ))(input)
+}
+
+// LEARN-81 — motion-wake parser tests (UNVALIDATED in the headless Runner).
+// Locks the `.cut()` prefix ordering: MOTION_WAKE_SPEED must not be shadowed by
+// the bare MOTION_WAKE bool.
+#[cfg(test)]
+mod motion_wake_parse_test {
+    use super::*;
+
+    fn parse_gyro(line: &str) -> GyroSetting {
+        let (cmds, errors) = jsm_parse(line);
+        assert!(errors.is_empty(), "unexpected parse errors: {:?}", errors);
+        assert_eq!(cmds.len(), 1, "expected exactly one cmd, got {:?}", cmds);
+        match &cmds[0] {
+            Cmd::Setting(Setting::Gyro(g)) => *g,
+            other => panic!("expected a Gyro setting, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn wake_speed_not_swallowed_by_bare_bool() {
+        match parse_gyro("MOTION_WAKE_SPEED = 8") {
+            GyroSetting::MotionWakeSpeed(s) => assert_eq!(s, 8.),
+            other => panic!("expected MotionWakeSpeed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bare_motion_wake_bool() {
+        match parse_gyro("MOTION_WAKE = ON") {
+            GyroSetting::MotionWakeEnabled(b) => assert!(b),
+            other => panic!("expected MotionWakeEnabled, got {:?}", other),
+        }
+        match parse_gyro("MOTION_WAKE = OFF") {
+            GyroSetting::MotionWakeEnabled(b) => assert!(!b),
+            other => panic!("expected MotionWakeEnabled, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sleep_speed_and_dwell() {
+        match parse_gyro("MOTION_SLEEP_SPEED = 3") {
+            GyroSetting::MotionSleepSpeed(s) => assert_eq!(s, 3.),
+            other => panic!("expected MotionSleepSpeed, got {:?}", other),
+        }
+        match parse_gyro("MOTION_SLEEP_DWELL = 0.5") {
+            GyroSetting::MotionSleepDwell(d) => {
+                assert_eq!(d, std::time::Duration::from_millis(500))
+            }
+            other => panic!("expected MotionSleepDwell, got {:?}", other),
+        }
+    }
 }

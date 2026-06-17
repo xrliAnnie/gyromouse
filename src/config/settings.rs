@@ -290,6 +290,15 @@ pub struct GyroSettings {
     pub precision_exit_speed: f64,
     pub precision_gain: f64,
     pub precision_boost: f64,
+    // LEARN-81 — motion-wake + dwell-auto-stop implicit clutch (UNVALIDATED).
+    // Default OFF: when disabled the gate is fully transparent so always-on /
+    // hold / toggle clutch and the LEARN-69 precision stack are bit-identical.
+    // Defaults are GUESS starting points ([推测]); Annie calibrates on device
+    // (LEARN-71 R3). Semantics live in engine::MotionWake.
+    pub motion_wake_enabled: bool,
+    pub motion_wake_speed: f64,
+    pub motion_sleep_speed: f64,
+    pub motion_sleep_dwell: Duration,
 }
 
 impl Default for GyroSettings {
@@ -313,6 +322,12 @@ impl Default for GyroSettings {
             precision_exit_speed: 8.,
             precision_gain: 0.5,
             precision_boost: 1.5,
+            // LEARN-81 defaults ([推测], UNVALIDATED) — OFF by default so existing
+            // behavior is untouched; wake>sleep gives speed hysteresis.
+            motion_wake_enabled: false,
+            motion_wake_speed: 8.,
+            motion_sleep_speed: 3.,
+            motion_sleep_dwell: Duration::from_millis(500),
         }
     }
 }
@@ -359,6 +374,17 @@ impl GyroSettings {
             }
             // NOTE: exit >= enter (hysteresis) is enforced at use-time in
             // GyroMouse::process, mirroring mapping.py::PrecisionMode.update.
+            // LEARN-81 (UNVALIDATED) — finite-guard so NaN/inf config falls back
+            // to the documented default. sleep <= wake (hysteresis) is enforced
+            // at use-time in engine::MotionWake::update.
+            GyroSetting::MotionWakeEnabled(b) => self.motion_wake_enabled = b,
+            GyroSetting::MotionWakeSpeed(s) => {
+                self.motion_wake_speed = if s.is_finite() { s.max(0.) } else { 8. }
+            }
+            GyroSetting::MotionSleepSpeed(s) => {
+                self.motion_sleep_speed = if s.is_finite() { s.max(0.) } else { 3. }
+            }
+            GyroSetting::MotionSleepDwell(d) => self.motion_sleep_dwell = d,
         }
     }
 }
