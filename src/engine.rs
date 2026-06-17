@@ -435,9 +435,10 @@ impl Gyro {
     /// `Engine::handle_motion_frame` so click-stabilization can gate the
     /// movement before it reaches the OS. Returns zero when gyro is disabled
     /// (e.g. GYRO_OFF held) so that the e-stop pause channel still stops the
-    /// cursor regardless of click state. LEARN-81 (UNVALIDATED): also gated by
-    /// the motion-wake implicit clutch (`self.enabled && awake`); the e-stop
-    /// (`enabled`) short-circuits so motion can never re-wake a disabled gyro.
+    /// cursor regardless of click state. LEARN-81 (UNVALIDATED): each sub-frame
+    /// is also gated by the motion-wake implicit clutch (only awake sub-frames
+    /// emit), and the whole result is gated by `enabled` so motion can never
+    /// re-wake a gyro the e-stop disabled.
     pub fn handle_frame(
         &mut self,
         settings: &Settings,
@@ -451,11 +452,6 @@ impl Gyro {
         }
         let mut delta_position = MouseMovement::zero();
         let dt = dt / motions.len() as u32;
-        // LEARN-81: track the implicit-clutch awake state for this batch. The
-        // last frame wins; updated every frame (even while e-stopped) so the
-        // state stays warm. `update` returns true when the feature is disabled,
-        // making the gate transparent (default-OFF bit-identical).
-        let mut awake = true;
         for frame in motions.iter().cloned() {
             let frame = self.calibration.calibrate(frame);
             let delta = space_mapper::map_input(
@@ -467,13 +463,23 @@ impl Gyro {
             // Raw angular speed (deg/s, pre-smoothing, post-calibration) — same
             // quantity precision mode senses; a still, calibrated hand reads ~0.
             let speed = (delta.x * delta.x + delta.y * delta.y).sqrt();
-            awake = self.motion_wake.update(&settings.gyro, speed, dt);
+            // Gate EACH sub-frame by its OWN motion-wake state: a multi-sample
+            // batch (hidapi passes `report.motion` as several samples) must emit
+            // only its awake sub-frames' movement, not apply the last frame's
+            // state to the whole accumulation. `process` always runs (keeps the
+            // smooth/precision state warm); only emission is gated. When the
+            // feature is disabled `update` always returns true, so every frame
+            // is added -> default-OFF bit-identical.
+            let awake = self.motion_wake.update(&settings.gyro, speed, dt);
             let offset = self.gyromouse.process(&settings.gyro, delta, dt);
-            delta_position += offset;
+            if awake {
+                delta_position += offset;
+            }
         }
-        // `self.enabled && awake` short-circuits on `enabled`: the GYRO_OFF
-        // e-stop always freezes the cursor and motion can never re-wake it.
-        if self.enabled && awake {
+        // The GYRO_OFF e-stop (enabled = false) still wins over everything:
+        // motion can never re-wake a gyro the e-stop disabled (MotionWake never
+        // writes `enabled`).
+        if self.enabled {
             delta_position
         } else {
             MouseMovement::zero()
@@ -888,5 +894,45 @@ mod motion_wake_gate_test {
             gyro.handle_frame(&settings, &[], ms(16)),
             MouseMovement::zero()
         );
+    }
+
+    // Codex R1 HIGH: a multi-sample batch (hidapi `report.motion`) must gate
+    // each sub-frame by its OWN awake state, not apply the last frame's state
+    // to the whole accumulation.
+    fn motion_wake_settings() -> Settings {
+        let mut s = local_settings();
+        s.gyro.motion_wake_enabled = true;
+        s.gyro.motion_wake_speed = 8.;
+        s.gyro.motion_sleep_speed = 3.;
+        s.gyro.motion_sleep_dwell = ms(1); // a single still sub-frame sleeps it
+        s
+    }
+
+    #[test]
+    fn multi_motion_keeps_awake_subframe_when_batch_ends_asleep() {
+        // awake -> sleep within one batch: the earlier awake movement must
+        // still be emitted (a last-frame gate would wrongly drop it to zero).
+        let settings = motion_wake_settings();
+        let mut gyro = Gyro::new(&settings, Calibration::empty());
+        assert_ne!(
+            gyro.handle_frame(&settings, &[motion(50.)], ms(16)), // wake first
+            MouseMovement::zero()
+        );
+        let out = gyro.handle_frame(&settings, &[motion(50.), motion(0.)], ms(16));
+        assert_ne!(out, MouseMovement::zero());
+    }
+
+    #[test]
+    fn multi_motion_suppresses_asleep_subframe_when_batch_ends_awake() {
+        // asleep -> wake within one batch: the leading asleep (in-band, nonzero)
+        // sub-frame must contribute nothing; only the waking sub-frame emits.
+        // Reference = the waking sub-frame alone at the same per-sub-frame dt.
+        let settings = motion_wake_settings();
+        let mut g1 = Gyro::new(&settings, Calibration::empty()); // asleep
+        let batch_out = g1.handle_frame(&settings, &[motion(5.), motion(50.)], ms(16));
+        let mut g2 = Gyro::new(&settings, Calibration::empty()); // asleep
+        let ref_out = g2.handle_frame(&settings, &[motion(50.)], ms(8)); // dt 16/2
+        assert_eq!(batch_out, ref_out);
+        assert_ne!(batch_out, MouseMovement::zero());
     }
 }
