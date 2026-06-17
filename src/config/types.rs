@@ -169,6 +169,12 @@ pub enum GyroSetting {
     PrecisionExitSpeed(f64),
     PrecisionGain(f64),
     PrecisionBoost(f64),
+    // LEARN-81 — motion-wake + dwell-auto-stop implicit clutch (LG Magic-Remote
+    // style, UNVALIDATED: not real-device tested headless). Default OFF.
+    MotionWakeEnabled(bool),
+    MotionWakeSpeed(f64),
+    MotionSleepSpeed(f64),
+    MotionSleepDwell(Duration),
 }
 
 /// LEARN-69 Feature 1 — Heisenberg click-stabilization settings.

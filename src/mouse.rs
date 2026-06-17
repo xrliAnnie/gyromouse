@@ -5,7 +5,9 @@ use enigo::{Coordinate, Enigo, Mouse as _};
 
 use crate::config::settings::MouseSettings;
 
-#[derive(Debug, Clone, Copy)]
+// PartialEq (LEARN-81): lets the engine gate tests assert exact zero/nonzero
+// movement; Deg<f64> already implements PartialEq.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MouseMovement {
     /// Horizontal axis, + to the right
     x: Deg<f64>,

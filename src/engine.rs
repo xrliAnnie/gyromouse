@@ -11,7 +11,7 @@ use hid_gamepad_types::{Acceleration, Motion, RotationSpeed};
 use crate::{
     calibration::Calibration,
     config::{
-        settings::{ClickStabSettings, Settings},
+        settings::{ClickStabSettings, GyroSettings, Settings},
         types::GyroSpace,
     },
     gyromouse::GyroMouse,
@@ -340,12 +340,76 @@ impl Engine {
     }
 }
 
+/// LEARN-81 — motion-wake + dwell-auto-stop implicit clutch (LG Magic-Remote
+/// style, UNVALIDATED: written but not real-device tested in the headless
+/// Runner). Pure hysteresis state machine: wakes when raw angular speed exceeds
+/// `motion_wake_speed`, sleeps after dwelling below `motion_sleep_speed` for
+/// `motion_sleep_dwell`. Two-fold hysteresis (wake > sleep speed band + the
+/// dwell timer) prevents oscillation/jitter.
+///
+/// It NEVER writes `Gyro::enabled`; it is AND-ed into the output gate as a
+/// separate signal, so `- = GYRO_OFF` (which sets `enabled = false`) always
+/// wins — motion can never re-wake a gyro the e-stop turned off (LEARN-62).
+/// When disabled the gate is fully transparent (always awake), so the default
+/// (OFF) behavior is bit-identical to the pre-feature engine.
+#[derive(Debug, Default)]
+struct MotionWake {
+    awake: bool,
+    /// Accumulated time spent below `motion_sleep_speed` while awake.
+    still_for: Duration,
+}
+
+impl MotionWake {
+    /// Update from the current raw angular speed (deg/s, pre-smoothing,
+    /// post-calibration) and the frame `dt`. Returns whether the implicit
+    /// clutch is awake. Starts asleep (`Default`) so the cursor never jumps on
+    /// launch.
+    fn update(&mut self, settings: &GyroSettings, speed: f64, dt: Duration) -> bool {
+        if !settings.motion_wake_enabled {
+            // Disabled = transparent gate: always awake, dwell cleared. This is
+            // the root of "default-OFF bit-identical": the gate reduces to
+            // `self.enabled`. (Does not preserve asleep state across a runtime
+            // toggle, but config is not hot-reloaded so that is moot.)
+            self.awake = true;
+            self.still_for = Duration::ZERO;
+            return true;
+        }
+        // Finite-guard the live, sensor-derived speed (LEARN-81 calls out
+        // finite/panic guards): a non-finite reading is treated as parked (0),
+        // never as wake motion.
+        let speed = if speed.is_finite() { speed.max(0.) } else { 0. };
+        let wake = settings.motion_wake_speed.max(0.);
+        // sleep <= wake (speed hysteresis) enforced here, mirroring how
+        // PrecisionMode clamps exit >= enter at use-time.
+        let sleep = settings.motion_sleep_speed.max(0.).min(wake);
+        if self.awake {
+            if speed < sleep {
+                self.still_for = self.still_for.saturating_add(dt);
+                if self.still_for >= settings.motion_sleep_dwell {
+                    self.awake = false;
+                }
+            } else {
+                // Any motion at/above the sleep threshold (incl. slow aiming in
+                // the sleep..wake band) resets the dwell — a brief pause shorter
+                // than the dwell never sleeps mid-aim.
+                self.still_for = Duration::ZERO;
+            }
+        } else if speed > wake {
+            self.awake = true;
+            self.still_for = Duration::ZERO;
+        }
+        self.awake
+    }
+}
+
 pub struct Gyro {
     enabled: bool,
     calibration: Calibration,
     sensor_fusion: Box<dyn SensorFusion>,
     space_mapper: Box<dyn SpaceMapper>,
     gyromouse: GyroMouse,
+    /// LEARN-81 — motion-wake implicit clutch gate (default OFF / transparent).
+    motion_wake: MotionWake,
 }
 
 impl Gyro {
@@ -362,6 +426,7 @@ impl Gyro {
                 GyroSpace::PlayerLean => todo!("Player Lean is unimplemented for now"),
             },
             gyromouse: GyroMouse::default(),
+            motion_wake: MotionWake::default(),
         }
     }
 
@@ -370,15 +435,27 @@ impl Gyro {
     /// `Engine::handle_motion_frame` so click-stabilization can gate the
     /// movement before it reaches the OS. Returns zero when gyro is disabled
     /// (e.g. GYRO_OFF held) so that the e-stop pause channel still stops the
-    /// cursor regardless of click state.
+    /// cursor regardless of click state. LEARN-81 (UNVALIDATED): also gated by
+    /// the motion-wake implicit clutch (`self.enabled && awake`); the e-stop
+    /// (`enabled`) short-circuits so motion can never re-wake a disabled gyro.
     pub fn handle_frame(
         &mut self,
         settings: &Settings,
         motions: &[Motion],
         dt: Duration,
     ) -> MouseMovement {
+        // Guard before `dt / motions.len()` so an empty slice can't divide by
+        // zero; nothing to emit anyway. (LEARN-81)
+        if motions.is_empty() {
+            return MouseMovement::zero();
+        }
         let mut delta_position = MouseMovement::zero();
         let dt = dt / motions.len() as u32;
+        // LEARN-81: track the implicit-clutch awake state for this batch. The
+        // last frame wins; updated every frame (even while e-stopped) so the
+        // state stays warm. `update` returns true when the feature is disabled,
+        // making the gate transparent (default-OFF bit-identical).
+        let mut awake = true;
         for frame in motions.iter().cloned() {
             let frame = self.calibration.calibrate(frame);
             let delta = space_mapper::map_input(
@@ -387,10 +464,16 @@ impl Gyro {
                 self.sensor_fusion.deref_mut(),
                 self.space_mapper.deref_mut(),
             );
+            // Raw angular speed (deg/s, pre-smoothing, post-calibration) — same
+            // quantity precision mode senses; a still, calibrated hand reads ~0.
+            let speed = (delta.x * delta.x + delta.y * delta.y).sqrt();
+            awake = self.motion_wake.update(&settings.gyro, speed, dt);
             let offset = self.gyromouse.process(&settings.gyro, delta, dt);
             delta_position += offset;
         }
-        if self.enabled {
+        // `self.enabled && awake` short-circuits on `enabled`: the GYRO_OFF
+        // e-stop always freezes the cursor and motion can never re-wake it.
+        if self.enabled && awake {
             delta_position
         } else {
             MouseMovement::zero()
@@ -563,5 +646,247 @@ mod click_stab_test {
         cs.on_click_tap(&s, t + ms(5)); // must be a no-op during a hold
         assert!(cs.suppressing);
         assert!(cs.pressed.contains(&0)); // Left still tracked
+    }
+}
+
+// LEARN-81 — MotionWake state-machine unit tests (UNVALIDATED in the headless
+// Runner; Annie runs `cargo test` on a real-device build). Pure logic, mirrors
+// the precision-mode test style.
+#[cfg(test)]
+mod motion_wake_test {
+    use super::*;
+
+    fn settings(enabled: bool, wake: f64, sleep: f64, dwell_ms: u64) -> GyroSettings {
+        let mut s = GyroSettings::default();
+        s.motion_wake_enabled = enabled;
+        s.motion_wake_speed = wake;
+        s.motion_sleep_speed = sleep;
+        s.motion_sleep_dwell = Duration::from_millis(dwell_ms);
+        s
+    }
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn initial_state_asleep() {
+        // Starts asleep so the cursor never jumps on launch.
+        assert!(!MotionWake::default().awake);
+    }
+
+    #[test]
+    fn disabled_transparent() {
+        // Disabled = always awake + dwell cleared + transparent gate (NOT "no
+        // state change"): this is the root of default-OFF bit-identical.
+        let mut m = MotionWake::default();
+        let s = settings(false, 8., 3., 500);
+        assert!(m.update(&s, 0., ms(16))); // still input, yet awake
+        assert!(m.awake);
+        m.still_for = ms(999); // stale dwell from a prior enabled run
+        assert!(m.update(&s, 0., ms(16)));
+        assert_eq!(m.still_for, Duration::ZERO); // cleared
+    }
+
+    #[test]
+    fn wakes_above_wake_speed() {
+        let mut m = MotionWake::default(); // asleep
+        assert!(m.update(&settings(true, 8., 3., 500), 9., ms(16)));
+        assert!(m.awake);
+    }
+
+    #[test]
+    fn stays_asleep_below_wake() {
+        // In the (sleep 3, wake 8) band: not enough to wake from sleep.
+        let mut m = MotionWake::default();
+        assert!(!m.update(&settings(true, 8., 3., 500), 5., ms(16)));
+        assert!(!m.awake);
+    }
+
+    #[test]
+    fn dwell_required_to_sleep() {
+        let s = settings(true, 8., 3., 100);
+        let mut m = MotionWake::default();
+        m.update(&s, 50., ms(16)); // wake
+        assert!(m.awake);
+        for _ in 0..5 {
+            m.update(&s, 0., ms(16)); // 80ms < 100ms dwell -> still awake
+        }
+        assert!(m.awake);
+        m.update(&s, 0., ms(40)); // total 120ms >= 100ms -> sleep
+        assert!(!m.awake);
+    }
+
+    #[test]
+    fn motion_resets_dwell() {
+        let s = settings(true, 8., 3., 100);
+        let mut m = MotionWake::default();
+        m.update(&s, 50., ms(16)); // wake
+        m.update(&s, 0., ms(60)); // 60ms still
+        assert!(m.awake);
+        m.update(&s, 50., ms(16)); // real motion resets dwell
+        assert_eq!(m.still_for, Duration::ZERO);
+        m.update(&s, 0., ms(60)); // only 60ms again -> still awake
+        assert!(m.awake);
+    }
+
+    #[test]
+    fn hysteresis_band_holds_awake() {
+        // Awake + speed in (sleep, wake) -> stays awake, dwell not counting.
+        let s = settings(true, 8., 3., 100);
+        let mut m = MotionWake::default();
+        m.update(&s, 50., ms(16)); // awake
+        assert!(m.update(&s, 5., ms(16)));
+        assert_eq!(m.still_for, Duration::ZERO);
+        assert!(m.awake);
+    }
+
+    #[test]
+    fn sleep_clamped_to_wake_when_inverted() {
+        // Inverted config sleep(9) > wake(8): use-time clamp makes sleep = 8.
+        let s = settings(true, 8., 9., 100);
+        let mut m = MotionWake::default();
+        m.update(&s, 50., ms(16)); // awake
+        assert!(m.update(&s, 8.5, ms(16))); // >= clamped sleep -> dwell resets, awake
+        assert_eq!(m.still_for, Duration::ZERO);
+        m.update(&s, 1., ms(200)); // < sleep, past dwell -> sleep
+        assert!(!m.awake);
+    }
+
+    #[test]
+    fn non_finite_speed_parked() {
+        // NaN/inf live readings are treated as parked (0), never as wake motion.
+        let s = settings(true, 8., 3., 100);
+        let mut m = MotionWake::default(); // asleep
+        assert!(!m.update(&s, f64::NAN, ms(16)));
+        assert!(!m.update(&s, f64::INFINITY, ms(16)));
+        assert!(!m.awake);
+    }
+
+    #[test]
+    fn negative_speed_clamped() {
+        let s = settings(true, 8., 3., 100);
+        let mut m = MotionWake::default();
+        m.update(&s, 50., ms(16)); // awake
+        m.update(&s, -5., ms(200)); // negative clamps to 0 -> past dwell -> sleep
+        assert!(!m.awake);
+    }
+}
+
+// LEARN-81 — MotionWake gate-integration tests at the Gyro::handle_frame
+// boundary (UNVALIDATED in the headless Runner). `space = Local` makes the
+// gyro->screen mapping deterministic (ignores the up vector).
+#[cfg(test)]
+mod motion_wake_gate_test {
+    use super::*;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    /// A motion whose LocalSpace mapping is `(speed, 0)` (magnitude == `speed`):
+    /// `LocalSpace::map = vec2(-rot.y, rot.x)`, so rot.y = -speed, rot.x = 0.
+    fn motion(speed: f64) -> Motion {
+        Motion {
+            rotation_speed: RotationSpeed {
+                x: 0.,
+                y: -speed,
+                z: 0.,
+            },
+            acceleration: Acceleration {
+                x: 0.,
+                y: 0.,
+                z: 0.,
+            },
+        }
+    }
+
+    fn local_settings() -> Settings {
+        let mut s = Settings::default();
+        s.gyro.space = GyroSpace::Local;
+        s
+    }
+
+    /// Hard requirement (a): the `- = GYRO_OFF` e-stop overrides motion-wake.
+    /// Motion must never re-enable a gyro the e-stop turned off (LEARN-62).
+    #[test]
+    fn estop_overrides_motion_wake() {
+        let mut settings = local_settings();
+        settings.gyro.motion_wake_enabled = true;
+        settings.gyro.motion_wake_speed = 0.; // any motion would wake it
+        let mut gyro = Gyro::new(&settings, Calibration::empty());
+        gyro.enabled = false; // e-stop engaged (GYRO_OFF held)
+        assert_eq!(
+            gyro.handle_frame(&settings, &[motion(50.)], ms(16)),
+            MouseMovement::zero()
+        );
+        assert!(!gyro.enabled); // motion-wake never wrote enabled
+        gyro.enabled = true; // release e-stop -> motion emits again
+        assert_ne!(
+            gyro.handle_frame(&settings, &[motion(50.)], ms(16)),
+            MouseMovement::zero()
+        );
+    }
+
+    /// Hard requirement (b): default OFF is an exact transparent gate. With the
+    /// feature disabled, output equals the pre-feature path exactly, and the
+    /// gate still reduces to `self.enabled` (hold/toggle/e-stop).
+    #[test]
+    fn default_off_preserves_movement_exactly() {
+        let settings = local_settings();
+        assert!(!settings.gyro.motion_wake_enabled); // default OFF
+        let mut gyro = Gyro::new(&settings, Calibration::empty()); // enabled = true
+        let dt = ms(10);
+        // delta = (100, 0); speed 100 > precision exit (8) -> no precision;
+        // default sens=(1,1), sign=(1,1), no smoothing/cutoff -> output =
+        // delta * dt_secs, same op order as process (f64 bit-identical).
+        let out = gyro.handle_frame(&settings, &[motion(100.)], dt);
+        let expected = MouseMovement::from_vec_deg(Vector2::new(100. * dt.as_secs_f64(), 0.));
+        assert_eq!(out, expected);
+        gyro.enabled = false; // gate reduces to self.enabled -> zero
+        assert_eq!(
+            gyro.handle_frame(&settings, &[motion(100.)], dt),
+            MouseMovement::zero()
+        );
+    }
+
+    /// Auto-stop: after dwell the cursor freezes even for a real sub-wake
+    /// motion (proving the sleep gate closed, not just that still frames emit
+    /// zero), then a clear above-wake motion re-wakes.
+    #[test]
+    fn auto_stop_then_rewake() {
+        let mut settings = local_settings();
+        settings.gyro.motion_wake_enabled = true;
+        settings.gyro.motion_wake_speed = 8.;
+        settings.gyro.motion_sleep_speed = 3.;
+        settings.gyro.motion_sleep_dwell = ms(100);
+        let mut gyro = Gyro::new(&settings, Calibration::empty()); // starts asleep
+        let dt = ms(16);
+        assert_ne!(
+            gyro.handle_frame(&settings, &[motion(50.)], dt), // wake
+            MouseMovement::zero()
+        );
+        for _ in 0..8 {
+            gyro.handle_frame(&settings, &[motion(0.)], dt); // 128ms still >= dwell
+        }
+        // asleep: a real in-band motion (sleep < 5 < wake) stays frozen
+        assert_eq!(
+            gyro.handle_frame(&settings, &[motion(5.)], dt),
+            MouseMovement::zero()
+        );
+        // above-wake motion re-wakes -> moves again
+        assert_ne!(
+            gyro.handle_frame(&settings, &[motion(50.)], dt),
+            MouseMovement::zero()
+        );
+    }
+
+    #[test]
+    fn empty_motions_returns_zero() {
+        let settings = local_settings();
+        let mut gyro = Gyro::new(&settings, Calibration::empty());
+        assert_eq!(
+            gyro.handle_frame(&settings, &[], ms(16)),
+            MouseMovement::zero()
+        );
     }
 }
