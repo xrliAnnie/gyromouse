@@ -103,20 +103,27 @@ pub struct RecoveryLadder {
 
 impl RecoveryLadder {
     pub fn new(cfg: WatchdogCfg) -> Self {
-        todo!()
+        RecoveryLadder {
+            cfg,
+            state: State::Unarmed,
+            grace_until: None,
+        }
     }
 
     /// A sensor event arrived for this (active, adopted) controller.
     /// Arms the ladder / feeds the watchdog / resets all escalation.
     pub fn on_sensor_event(&mut self, now: Instant) {
-        todo!()
+        self.state = State::Armed { last_event: now };
     }
 
     /// SDL itself declared the device disconnected (logical disconnect —
     /// the device index is gone, so L1 is impossible). Wait `orphan_after`
     /// for a spontaneous re-add, then start the L2 ladder.
     pub fn on_device_removed(&mut self, now: Instant) {
-        todo!()
+        self.state = State::ReinitPending {
+            next_at: now + self.cfg.orphan_after,
+            backoff: self.cfg.reinit_backoff_start,
+        };
     }
 
     /// Poll once per loop tick. Returns the action that is due, if any,
@@ -124,30 +131,78 @@ impl RecoveryLadder {
     /// caller reports the result (`on_reopen_result` / `on_reinit_attempted`
     /// schedule the next deadline).
     pub fn poll(&mut self, now: Instant) -> Option<Action> {
-        todo!()
+        match self.state {
+            State::Unarmed => None,
+            State::Armed { last_event } => {
+                if now.duration_since(last_event) >= self.cfg.stall_after {
+                    // Stall declared: enter the L1 ladder. The caller must
+                    // perform the reopen and report via on_reopen_result,
+                    // which schedules the next attempt.
+                    self.state = State::Reopening {
+                        attempts: 0,
+                        next_at: now,
+                    };
+                    Some(Action::ReopenController)
+                } else {
+                    None
+                }
+            }
+            State::Reopening { attempts, next_at } => {
+                if now < next_at {
+                    None
+                } else if attempts >= self.cfg.max_reopens {
+                    // L1 exhausted: escalate. The caller must perform the
+                    // reinit and report via on_reinit_attempted.
+                    self.state = State::ReinitPending {
+                        next_at: now,
+                        backoff: self.cfg.reinit_backoff_start,
+                    };
+                    Some(Action::ReinitSubsystem)
+                } else {
+                    Some(Action::ReopenController)
+                }
+            }
+            State::ReinitPending { next_at, .. } => {
+                if now < next_at {
+                    None
+                } else {
+                    Some(Action::ReinitSubsystem)
+                }
+            }
+        }
     }
 
     /// Report the outcome of a `ReopenController` action. Failed opens
     /// count as attempts too (Codex R1 §2); success alone is not recovery —
     /// only a sensor event resets the ladder.
-    pub fn on_reopen_result(&mut self, ok: bool, now: Instant) {
-        todo!()
+    pub fn on_reopen_result(&mut self, _ok: bool, now: Instant) {
+        if let State::Reopening { attempts, .. } = self.state {
+            self.state = State::Reopening {
+                attempts: attempts + 1,
+                next_at: now + self.cfg.reopen_interval,
+            };
+        }
     }
 
     /// Report that a `ReinitSubsystem` action was performed; schedules the
     /// next retry with exponential backoff (×2, capped, never gives up).
     pub fn on_reinit_attempted(&mut self, now: Instant) {
-        todo!()
+        if let State::ReinitPending { backoff, .. } = self.state {
+            self.state = State::ReinitPending {
+                next_at: now + backoff,
+                backoff: (backoff * 2).min(self.cfg.reinit_backoff_max),
+            };
+        }
     }
 
     /// Begin the post-recovery grace window (motion suppressed).
     pub fn start_grace(&mut self, now: Instant) {
-        todo!()
+        self.grace_until = Some(now + self.cfg.grace);
     }
 
     /// True while inside the grace window: skip `apply_motion`.
     pub fn in_grace(&self, now: Instant) -> bool {
-        todo!()
+        self.grace_until.map_or(false, |until| now < until)
     }
 }
 
@@ -322,12 +377,17 @@ mod tests {
         let t = timeline();
         let mut l = RecoveryLadder::new(cfg());
         l.on_sensor_event(t(0));
-        l.on_device_removed(t(1000));
-        l.on_sensor_event(t(3000)); // spontaneous re-add + data before orphan_after
-        assert_eq!(l.poll(t(6000)), None);
-        // Healthy again: next stall fires from L1.
-        assert_eq!(l.poll(t(5000 - 1)), None);
-        assert_eq!(l.poll(t(3000 + 2000)), Some(Action::ReopenController));
+        l.on_device_removed(t(1000)); // orphan deadline would be t(6000)
+        // Spontaneous re-add + data before orphan_after; keep the stream
+        // flowing across the old orphan deadline.
+        l.on_sensor_event(t(3000));
+        l.on_sensor_event(t(4500));
+        l.on_sensor_event(t(6500));
+        // No stale ReinitSubsystem fires at/after the old deadline.
+        assert_eq!(l.poll(t(6600)), None);
+        // A later stall starts from L1 (Armed semantics), not L2.
+        assert_eq!(l.poll(t(8499)), None);
+        assert_eq!(l.poll(t(8500)), Some(Action::ReopenController));
     }
 
     // 12. A reopen that succeeds but yields no events is NOT recovery: the
