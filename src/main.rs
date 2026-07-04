@@ -44,7 +44,8 @@ fn main() {
     .authors(env!("CARGO_PKG_AUTHORS").replace(":", ", "))
     .homepage(env!("CARGO_PKG_REPOSITORY")));
 
-    if let Err(e) = do_main() {
+    let result = do_main();
+    if let Err(ref e) = result {
         eprintln!("Error: {:?}", e);
     }
 
@@ -53,6 +54,13 @@ fn main() {
     let _ = std::io::stdin()
         .read(&mut [0u8])
         .expect("can't wait for end of program");
+
+    if result.is_err() {
+        // LEARN-197 (C3): business errors used to exit 0, making a dead
+        // run loop indistinguishable from a clean quit for the wrapper
+        // (run.sh judges failure by exit code OR error-pattern output).
+        std::process::exit(1);
+    }
 }
 
 fn do_main() -> anyhow::Result<()> {
