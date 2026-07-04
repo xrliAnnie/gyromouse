@@ -357,14 +357,20 @@ impl Stick for AreaStick {
     }
 }
 
-pub enum ScrollStick {
-    Center,
-    Scrolling { last: Deg<f64>, acc: f64 },
+// Fork change: upstream SCROLL_WHEEL was a rotation dial emitting vertical
+// scroll only. This is a directional 4-way scroller instead: push the stick
+// up/down for vertical and left/right for horizontal scrolling, with the
+// scroll rate proportional to deflection. SCROLL_SENS keeps its
+// smaller-is-faster feel: lines per second at full deflection = 360 / sens.
+pub struct ScrollStick {
+    acc: Vector2<f64>,
 }
 
 impl ScrollStick {
     pub fn new() -> Self {
-        Self::Center
+        Self {
+            acc: Vector2::zero(),
+        }
     }
 }
 
@@ -377,27 +383,31 @@ impl Stick for ScrollStick {
         _bindings: &mut Buttons,
         mouse: &mut Mouse,
         _now: Instant,
-        _dt: Duration,
+        dt: Duration,
     ) {
-        let angle = vec2(0., 1.).angle(stick).into();
-        match self {
-            _ if stick.magnitude() < settings.stick.deadzone => *self = Self::Center,
-            ScrollStick::Center => {
-                *self = ScrollStick::Scrolling {
-                    last: angle,
-                    acc: 0.,
-                }
-            }
-            ScrollStick::Scrolling { last, acc } => {
-                let delta = (angle - *last).normalize_signed() / settings.stick.scroll.sens + *acc;
-                let delta_rounded = delta.round();
-                *acc = delta - delta_rounded;
-                mouse
-                    .enigo()
-                    .scroll(delta_rounded as i32, Axis::Vertical)
-                    .unwrap();
-                *last = angle;
-            }
+        if stick.magnitude() < settings.stick.deadzone {
+            self.acc = Vector2::zero();
+            return;
+        }
+        let rate = 360. / settings.stick.scroll.sens.0.max(1.);
+        // stick.y is + up (backends flip it); enigo + is down/right.
+        self.acc.y += -stick.y * rate * dt.as_secs_f64();
+        self.acc.x += stick.x * rate * dt.as_secs_f64();
+        let ticks_y = self.acc.y.round();
+        if ticks_y != 0. {
+            mouse
+                .enigo()
+                .scroll(ticks_y as i32, Axis::Vertical)
+                .unwrap();
+            self.acc.y -= ticks_y;
+        }
+        let ticks_x = self.acc.x.round();
+        if ticks_x != 0. {
+            mouse
+                .enigo()
+                .scroll(ticks_x as i32, Axis::Horizontal)
+                .unwrap();
+            self.acc.x -= ticks_x;
         }
     }
 }

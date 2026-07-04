@@ -323,6 +323,19 @@ impl Buttons {
         self.state[key].last_update = now;
     }
 
+    /// LEARN-197: synthesize `key_up` for every mapped key. Used before
+    /// parking an engine across a stall recovery so a held mouse button or
+    /// hold-to-move layer cannot survive the controller swap. `key_up` is a
+    /// no-op for keys that are already up, so this is safe to call blindly.
+    /// Double-click/hold timing edges are intentionally not simulated: this
+    /// is a bulk release; the queued on_up actions are flushed by the caller
+    /// (`Engine::apply_actions`).
+    pub fn release_all(&mut self, now: Instant) {
+        for key in (0..<MapKey as Enum>::LENGTH).map(<MapKey as Enum>::from_usize) {
+            self.key_up(key, now);
+        }
+    }
+
     pub fn key(&mut self, key: impl Into<MapKey>, pressed: bool, now: Instant) {
         let key = key.into();
         if pressed {
@@ -443,5 +456,62 @@ mod test {
                 assert!(a.next().is_none());
             }
         }
+    }
+
+    // LEARN-197: release_all is used before parking an engine across a stall
+    // recovery — a held mouse button must emit its on_up action, and calling
+    // it with nothing pressed must emit nothing (key_up is up-state no-op).
+    #[test]
+    fn release_all_releases_held_mouse_button() {
+        let mut mapping = Buttons::new();
+        mapping
+            .get(JoyKey::ZL, 0)
+            .on_down
+            .push(Action::Ext(ExtAction::MousePress(
+                Button::Left,
+                ClickType::Press,
+            )));
+        mapping
+            .get(JoyKey::ZL, 0)
+            .on_up
+            .push(Action::Ext(ExtAction::MousePress(
+                Button::Left,
+                ClickType::Release,
+            )));
+
+        let t0 = Instant::now();
+        mapping.key_down(JoyKey::ZL, t0);
+        let mut a = mapping.tick(t0);
+        assert!(matches!(
+            a.next(),
+            Some(ExtAction::MousePress(Button::Left, ClickType::Press))
+        ));
+        assert!(a.next().is_none());
+        drop(a);
+
+        // Stall hits while the button is logically held.
+        mapping.release_all(t0 + Duration::from_millis(50));
+        let mut a = mapping.tick(t0 + Duration::from_millis(50));
+        assert!(matches!(
+            a.next(),
+            Some(ExtAction::MousePress(Button::Left, ClickType::Release))
+        ));
+        assert!(a.next().is_none());
+    }
+
+    #[test]
+    fn release_all_is_noop_when_nothing_pressed() {
+        let mut mapping = Buttons::new();
+        mapping
+            .get(JoyKey::ZL, 0)
+            .on_up
+            .push(Action::Ext(ExtAction::MousePress(
+                Button::Left,
+                ClickType::Release,
+            )));
+        let t0 = Instant::now();
+        mapping.release_all(t0);
+        let mut a = mapping.tick(t0);
+        assert!(a.next().is_none());
     }
 }

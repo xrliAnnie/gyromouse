@@ -50,10 +50,21 @@ impl Mouse {
         })
     }
 
+    /// Convert a gyro `MouseMovement` (degrees, +y up) to a float pixel delta
+    /// (+y down) using the calibration. LEARN-69 (UNVALIDATED): exposed so the
+    /// engine can gate movement in float pixel space BEFORE the integer
+    /// quantization / `error_accumulator` in `mouse_move_relative_pixel`.
+    pub fn movement_to_pixels(
+        &self,
+        settings: &MouseSettings,
+        offset: MouseMovement,
+    ) -> Vector2<f64> {
+        vec2(offset.x.0, -offset.y.0) * settings.real_world_calibration * settings.in_game_sens
+    }
+
     // mouse movement is pixel perfect, so we keep track of the error.
     pub fn mouse_move_relative(&mut self, settings: &MouseSettings, offset: MouseMovement) {
-        let offset_pixel =
-            vec2(offset.x.0, -offset.y.0) * settings.real_world_calibration * settings.in_game_sens;
+        let offset_pixel = self.movement_to_pixels(settings, offset);
         self.mouse_move_relative_pixel(offset_pixel);
     }
 
@@ -79,5 +90,51 @@ impl Mouse {
 
     pub fn enigo(&mut self) -> &mut Enigo {
         &mut self.enigo
+    }
+
+    /// Keyboard emission with platform fixups. On macOS the Fn/Globe key
+    /// must carry NX_SECONDARYFNMASK on key-down (and clear it on key-up)
+    /// or system listeners ignore it; enigo posts the bare keycode only,
+    /// so mirror JoyKeyMapper's CGEvent behavior for that key.
+    pub fn key(&mut self, key: enigo::Key, direction: enigo::Direction) -> anyhow::Result<()> {
+        #[cfg(target_os = "macos")]
+        if matches!(key, enigo::Key::Function) {
+            return send_macos_fn_key(direction);
+        }
+        use enigo::Keyboard as _;
+        self.enigo.key(key, direction)?;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn send_macos_fn_key(direction: enigo::Direction) -> anyhow::Result<()> {
+    use anyhow::anyhow;
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    const FN_KEYCODE: u16 = 63; // kVK_Function
+
+    let send = |key_down: bool| -> anyhow::Result<()> {
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|()| anyhow!("can't create CGEventSource"))?;
+        let event = CGEvent::new_keyboard_event(source, FN_KEYCODE, key_down)
+            .map_err(|()| anyhow!("can't create Fn key CGEvent"))?;
+        event.set_flags(if key_down {
+            CGEventFlags::CGEventFlagSecondaryFn
+        } else {
+            CGEventFlags::CGEventFlagNull
+        });
+        event.post(CGEventTapLocation::HID);
+        Ok(())
+    };
+
+    match direction {
+        enigo::Direction::Press => send(true),
+        enigo::Direction::Release => send(false),
+        enigo::Direction::Click => {
+            send(true)?;
+            send(false)
+        }
     }
 }

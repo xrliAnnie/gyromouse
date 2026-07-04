@@ -162,6 +162,22 @@ pub enum GyroSetting {
     CutoffRecovery(f64),
     SmoothThreshold(f64),
     SmoothTime(Duration),
+    // LEARN-69 Feature 2 — slow-speed auto precision mode (UNVALIDATED: not
+    // compiled / not real-device tested headless; Python oracle is the spec).
+    PrecisionEnabled(bool),
+    PrecisionEnterSpeed(f64),
+    PrecisionExitSpeed(f64),
+    PrecisionGain(f64),
+    PrecisionBoost(f64),
+}
+
+/// LEARN-69 Feature 1 — Heisenberg click-stabilization settings.
+/// UNVALIDATED: written but not compiled / real-device tested headless.
+#[derive(Debug, Copy, Clone)]
+pub enum ClickStabSetting {
+    Enabled(bool),
+    Time(Duration),
+    DragDistance(f64),
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -192,6 +208,8 @@ pub enum Setting {
     RightRingMode(RingMode),
     Stick(StickSetting),
     Mouse(MouseSetting),
+    // LEARN-69 Feature 1 (UNVALIDATED)
+    ClickStab(ClickStabSetting),
 }
 
 #[derive(Debug, Clone)]
